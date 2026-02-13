@@ -1,0 +1,308 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>MEXC KASPA Bot Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="/static/style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <div class="title">MEXC KASPA Bot</div>
+    <div class="subtitle">
+      Symbol: <b>{{ settings.symbol }}</b> · Live: <b>{{ "YES" if settings.live_trading else "NO (dry-run)" }}</b>
+      · <a href="/api/export/trades.csv">trades.csv</a> · <a href="/api/export/equity.csv">equity.csv</a>
+    </div>
+  </div>
+
+  <div class="status">
+    <div class="chip"><span>USDT</span><b id="hUsdt">0.00</b></div>
+    <div class="chip"><span>KAS</span><b id="hKas">0.000000</b></div>
+    <div class="chip"><span>Price</span><b id="hPrice">0.000000</b></div>
+    <div class="chip"><span>Equity</span><b id="hEquity">0.00</b></div>
+    <div class="chip"><span>PnL</span><b id="hPnl">0.00</b> <span class="muted" id="hPct">(0.00%)</span></div>
+  </div>
+</header>
+
+<div class="halt" id="haltBanner" style="display:none;"></div>
+<div class="panel controls">
+  <div class="panel-title">Live Controls</div>
+  <div class="controls-row">
+    <label>Mode
+      <select id="modeSelect"></select>
+    </label>
+
+    <label>Max trade %
+      <input id="maxTradeFrac" type="range" min="0.02" max="0.30" step="0.01" value="0.12" />
+      <span class="val" id="maxTradeFracVal">0.12</span>
+    </label>
+
+    <label>Trail %
+      <input id="trailPct" type="range" min="0.0005" max="0.0030" step="0.0001" value="0.0013" />
+      <span class="val" id="trailPctVal">0.0013</span>
+    </label>
+
+    <label>TP1 %
+      <input id="tp1Pct" type="range" min="0.0005" max="0.0040" step="0.0001" value="0.0016" />
+      <span class="val" id="tp1PctVal">0.0016</span>
+    </label>
+
+    <label>Stop %
+      <input id="stopPct" type="range" min="0.0005" max="0.0040" step="0.0001" value="0.0022" />
+      <span class="val" id="stopPctVal">0.0022</span>
+    </label>
+
+    <button id="applyBtn">Apply</button>
+    <button id="clearBtn" class="ghost">Clear overrides</button>
+  </div>
+  <div class="muted small">
+    Tip: leave “Auto mode” on in bot (default). In DOWNTREND it auto-switches to <b>scalp_downtrend</b>, in UPTREND to <b>momentum</b> when flat.
+  </div>
+</div>
+
+
+<section class="maingrid">
+  <div class="leftcol">
+    <div class="card">
+      <h2>Open Position</h2>
+      <div class="kvs" id="posBox">
+        <div><span>Qty</span><b id="pQty">0</b></div>
+        <div><span>Avg</span><b id="pAvg">0</b></div>
+        <div><span>Stop</span><b id="pStop">0</b></div>
+        <div><span>Trail</span><b id="pTrail">0</b></div>
+        <div><span>TP1</span><b id="pTP1">0</b></div>
+        <div><span>TP2</span><b id="pTP2">0</b></div>
+      </div>
+      <p class="muted small">Auto refresh.</p>
+    </div>
+
+    <div class="card">
+      <h2>Performance</h2>
+      <div class="kvs">
+        <div><span>Trades</span><b id="sTrades">0</b></div>
+        <div><span>Win rate</span><b id="sWR">0%</b></div>
+        <div><span>Profit factor</span><b id="sPF">0</b></div>
+        <div><span>Max DD</span><b id="sDD">0</b></div>
+        <div><span>Avg hold</span><b id="sHold">0s</b></div>
+        <div><span>Realized</span><b id="sReal">0</b></div>
+      </div>
+      <p class="muted small">Stats refresh every 5s.</p>
+    </div>
+  </div>
+
+  <div class="rightcol">
+    <div class="card">
+      <h2>Equity Curve</h2>
+      <canvas id="equityChart" height="170"></canvas>
+      <p class="muted small">Equity = sim USDT + sim KAS × price.</p>
+    </div>
+
+    <div class="card">
+      <h2>Price</h2>
+      <canvas id="priceChart" height="170"></canvas>
+    </div>
+  </div>
+</section>
+
+<section class="bottomgrid">
+  <div class="card">
+    <h2>Recent Trades</h2>
+    <table>
+      <thead><tr><th>UTC</th><th>Side</th><th>Qty</th><th>Price</th></tr></thead>
+      <tbody id="tradesBody"></tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Recent Orders</h2>
+    <table>
+      <thead><tr><th>UTC</th><th>Side</th><th>Type</th><th>Quote</th><th>OrderId</th></tr></thead>
+      <tbody id="ordersBody"></tbody>
+    </table>
+  </div>
+</section>
+
+<script>
+let equityChart, priceChart;
+
+function setText(id, v) { const el = document.getElementById(id); if (el) el.textContent = v; }
+
+async function refresh() {
+  const er = await fetch("/api/equity");
+  const equity = await er.json();
+
+  const labels = equity.map(x => (x.t || "").slice(11,19));
+  const eq = equity.map(x => x.equity);
+  const price = equity.map(x => x.price);
+  const realized = equity.map(x => x.realized);
+  const unrealized = equity.map(x => x.unrealized);
+
+  if (!equityChart) {
+    equityChart = new Chart(document.getElementById("equityChart"), {
+      type: "line",
+      data: { labels, datasets: [
+        { label: "Equity (USDT)", data: eq, tension: 0.15 },
+        { label: "Realized", data: realized, tension: 0.15 },
+        { label: "Unrealized", data: unrealized, tension: 0.15 },
+      ]},
+      options: { responsive: true, animation: false }
+    });
+
+    priceChart = new Chart(document.getElementById("priceChart"), {
+      type: "line",
+      data: { labels, datasets: [{ label: "Price", data: price, tension: 0.15 }]},
+      options: { responsive: true, animation: false }
+    });
+  } else {
+    equityChart.data.labels = labels;
+    equityChart.data.datasets[0].data = eq;
+    equityChart.data.datasets[1].data = realized;
+    equityChart.data.datasets[2].data = unrealized;
+    equityChart.update();
+
+    priceChart.data.labels = labels;
+    priceChart.data.datasets[0].data = price;
+    priceChart.update();
+  }
+
+  const rr = await fetch("/api/recent");
+  const recent = await rr.json();
+
+  const tBody = document.getElementById("tradesBody");
+  tBody.innerHTML = "";
+  (recent.trades || []).slice(0, 20).forEach(t => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${Math.floor(t.ts/1000)}</td>
+      <td class="${t.side==='BUY'?'buy':'sell'}">${t.side}</td>
+      <td>${Number(t.qty||0).toFixed(6)}</td>
+      <td>${Number(t.price||0).toFixed(6)}</td>
+    `;
+    tBody.appendChild(tr);
+  });
+
+  const oBody = document.getElementById("ordersBody");
+  oBody.innerHTML = "";
+  (recent.orders || []).slice(0, 20).forEach(o => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${Math.floor(o.ts/1000)}</td>
+      <td class="${o.side==='BUY'?'buy':'sell'}">${o.side}</td>
+      <td>${o.type||''}</td>
+      <td>${Number(o.quote_qty||0).toFixed(2)}</td>
+      <td class="mono">${o.mexc_order_id||''}</td>
+    `;
+    oBody.appendChild(tr);
+  });
+
+  // stats + holdings
+  const sr = await fetch("/api/stats");
+  const s = await sr.json();
+
+  setText("hUsdt", Number(s.sim_usdt||0).toFixed(2));
+  setText("hKas", Number(s.sim_kas||0).toFixed(6));
+  setText("hPrice", Number(s.last_price||0).toFixed(6));
+  setText("hEquity", Number(s.total_equity_calc||0).toFixed(2));
+  setText("hPnl", Number(s.pnl_usdt||0).toFixed(2));
+  setText("hPct", "(" + Number(s.pnl_pct||0).toFixed(2) + "%)");
+
+  setText("sTrades", s.trades||0);
+  setText("sWR", Number(s.win_rate||0).toFixed(2) + "%");
+  setText("sPF", (s.profit_factor>1e18) ? "∞" : Number(s.profit_factor||0).toFixed(2));
+  setText("sDD", Number(s.max_drawdown_usdt||0).toFixed(2));
+  setText("sHold", Number(s.avg_hold_sec||0).toFixed(1) + "s");
+  setText("sReal", Number(s.realized_from_trades_usdt||0).toFixed(2));
+
+  const pos = recent.position || {};
+  setText("pQty", Number(pos.qty||0).toFixed(6));
+  const avg = (pos.qty>0) ? (Number(pos.cost_usdt||0)/Number(pos.qty||1)) : 0;
+  setText("pAvg", Number(avg||0).toFixed(6));
+  setText("pStop", Number(pos.stop||0).toFixed(6));
+  setText("pTrail", Number(pos.trail||0).toFixed(6));
+  setText("pTP1", Number(pos.tp1||0).toFixed(6));
+  setText("pTP2", Number(pos.tp2||0).toFixed(6));
+
+  const hb = document.getElementById("haltBanner");
+  if (s.halted) {
+    hb.style.display = "block";
+    hb.textContent = "BOT STOPPED: " + (s.halt_reason || "halted");
+  } else {
+    hb.style.display = "none";
+    hb.textContent = "";
+  }
+}
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+
+<script>
+(async function(){
+  function $(id){ return document.getElementById(id); }
+  const modeSelect = $("modeSelect");
+  const maxTradeFrac = $("maxTradeFrac");
+  const trailPct = $("trailPct");
+  const tp1Pct = $("tp1Pct");
+  const stopPct = $("stopPct");
+
+  const maxTradeFracVal = $("maxTradeFracVal");
+  const trailPctVal = $("trailPctVal");
+  const tp1PctVal = $("tp1PctVal");
+  const stopPctVal = $("stopPctVal");
+
+  function bindRange(el, out){
+    const upd = () => out.textContent = Number(el.value).toFixed( el.step.includes(".") ? el.step.split(".")[1].length : 2 );
+    el.addEventListener("input", upd);
+    upd();
+  }
+  bindRange(maxTradeFrac, maxTradeFracVal);
+  bindRange(trailPct, trailPctVal);
+  bindRange(tp1Pct, tp1PctVal);
+  bindRange(stopPct, stopPctVal);
+
+  async function loadConfig(){
+    const r = await fetch("/api/config");
+    const j = await r.json();
+    modeSelect.innerHTML = "";
+    (j.presets||[]).forEach(m=>{
+      const opt=document.createElement("option");
+      opt.value=m; opt.textContent=m;
+      modeSelect.appendChild(opt);
+    });
+    modeSelect.value = j.mode || "balanced";
+    const o = j.overrides || {};
+    if(o.max_trade_frac != null) maxTradeFrac.value = o.max_trade_frac;
+    if(o.trail_pct != null) trailPct.value = o.trail_pct;
+    if(o.tp1_base_pct != null) tp1Pct.value = o.tp1_base_pct;
+    if(o.stop_base_pct != null) stopPct.value = o.stop_base_pct;
+    maxTradeFrac.dispatchEvent(new Event("input"));
+    trailPct.dispatchEvent(new Event("input"));
+    tp1Pct.dispatchEvent(new Event("input"));
+    stopPct.dispatchEvent(new Event("input"));
+  }
+
+  $("applyBtn").addEventListener("click", async ()=>{
+    await fetch("/api/config/mode", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({mode: modeSelect.value})});
+    const overrides = {
+      max_trade_frac: Number(maxTradeFrac.value),
+      trail_pct: Number(trailPct.value),
+      tp1_base_pct: Number(tp1Pct.value),
+      stop_base_pct: Number(stopPct.value),
+    };
+    await fetch("/api/config/overrides", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(overrides)});
+  });
+
+  $("clearBtn").addEventListener("click", async ()=>{
+    await fetch("/api/config/overrides", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({__clear__: true})});
+    await loadConfig();
+  });
+
+  await loadConfig();
+})();
+</script>
+
+</body>
+</html>
